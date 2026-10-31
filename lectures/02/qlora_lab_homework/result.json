@@ -1,0 +1,56 @@
+{
+  "config": {
+    "base_model": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "seed": 42,
+    "num_train_epochs": 5,
+    "warmup_steps": 6,
+    "lr": 0.0002,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "max_seq_len": 512,
+    "max_new_tokens": 1024,
+    "gen": {
+      "do_sample": false
+    },
+    "glossary_sft": "/content/drive/MyDrive/10.学習/AIE2026/lec02/glossary_sft.jsonl",
+    "eval_json": "/content/drive/MyDrive/10.学習/AIE2026/lec02/eval_glossary_draft.json"
+  },
+  "versions": {
+    "transformers": "5.18.0",
+    "peft": "0.21.1",
+    "trl": "1.14.2",
+    "torch": "2.11.0+cu130"
+  },
+  "method": "LoRAによるSFT（量子化なし）",
+  "metric": "キーワード群による要点一致率（グループ内OR・グループ間AND）",
+  "before": {
+    "label": "before",
+    "n": 12,
+    "rate": 0.4166666666666667,
+    "用語集にある語": 0.25,
+    "言い回しを変えた質問": 0.5,
+    "用語集にない語": 0.5,
+    "seconds": 159.5
+  },
+  "after": {
+    "label": "after",
+    "n": 12,
+    "rate": 0.4166666666666667,
+    "用語集にある語": 0.75,
+    "言い回しを変えた質問": 0.5,
+    "用語集にない語": 0.0,
+    "seconds": 101.8
+  },
+  "regressed": [
+    "「AIエンジニアリング」とは何ですか？",
+    "Transformerとは何ですか？",
+    "Dockerとは何ですか？"
+  ],
+  "improved": [
+    "「トークン」とは何ですか？",
+    "「LoRA」とは何ですか？",
+    "「ツール（Tool use / Function calling）」とは何ですか？"
+  ],
+  "executed_training_myself": true
+}
