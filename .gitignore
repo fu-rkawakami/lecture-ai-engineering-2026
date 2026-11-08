@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# ADK のローカル実行データ（会話履歴など）
+.adk/
+
 # 秘密情報はコミットしない（APIキーは Codespaces secret で渡す）
 .env
 .env.*
