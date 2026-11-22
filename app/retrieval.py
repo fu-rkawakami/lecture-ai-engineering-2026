@@ -5,8 +5,9 @@ import json
 import math
 import re
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 from google import genai
@@ -138,8 +139,81 @@ def search(query: str) -> list[dict]:
         return [dict(row) for row in rows]
 
 
-def search_graph(query: str) -> dict:
-    """ベクトル検索を入口に、前後ページと共通用語で候補を広げる。"""
+def _bm25_terms(text: str) -> list[str]:
+    """英数字は単語、日本語は1文字・2文字の並びに分ける。"""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    terms = []
+    for segment in re.findall(r"[a-z0-9]+|[^\W_a-z0-9]+", normalized):
+        if segment.isascii():
+            terms.append(segment)
+        else:
+            terms.extend(segment)
+            terms.extend(segment[i:i + 2] for i in range(len(segment) - 1))
+    return terms
+
+
+def _bm25_page_ids(query: str, pages: dict[str, dict]) -> list[str]:
+    """タイトルと本文でBM25を計算し、検索語が一致したページの上位を返す。"""
+    query_terms = set(_bm25_terms(query))
+    if not query_terms or not pages:
+        return []
+
+    page_terms = {
+        page_id: Counter(_bm25_terms(f"{page['title']}\n{page['content']}"))
+        for page_id, page in pages.items()
+    }
+    lengths = {page_id: terms.total() for page_id, terms in page_terms.items()}
+    average_length = sum(lengths.values()) / len(lengths)
+    if not average_length:
+        return []
+    document_frequency = Counter(
+        term for terms in page_terms.values() for term in query_terms & terms.keys()
+    )
+    idf = {
+        term: math.log1p((len(pages) - frequency + 0.5) / (frequency + 0.5))
+        for term, frequency in document_frequency.items()
+    }
+
+    k1, b = 1.2, 0.75
+    matched_terms = sorted(idf)
+    scores = {}
+    for page_id, terms in page_terms.items():
+        normalization = k1 * (1 - b + b * lengths[page_id] / average_length)
+        score = sum(
+            idf[term] * terms[term] * (k1 + 1) / (terms[term] + normalization)
+            for term in matched_terms
+            if term in terms
+        )
+        if score > 0:
+            scores[page_id] = score
+    return sorted(scores, key=lambda page_id: (-scores[page_id], page_id))[:RAG_TOP_K]
+
+
+def _rrf_graph_seeds(vector_hits: list[dict], bm25_ids: list[str], limit: int) -> list[dict]:
+    """同じページの順位スコアを足し合わせ、RRF60の上位を入口にする。"""
+    vector_ranks = {hit["page_id"]: rank for rank, hit in enumerate(vector_hits, 1)}
+    bm25_ranks = {page_id: rank for rank, page_id in enumerate(bm25_ids, 1)}
+    distances = {hit["page_id"]: hit["distance"] for hit in vector_hits}
+    scores = defaultdict(float)
+    for ranks in (vector_ranks, bm25_ranks):
+        for page_id, rank in ranks.items():
+            scores[page_id] += 1 / (60 + rank)
+
+    page_ids = sorted(scores, key=lambda page_id: (-scores[page_id], page_id))[:limit]
+    return [
+        {
+            "page_id": page_id,
+            "distance": distances.get(page_id),
+            "vector_rank": vector_ranks.get(page_id),
+            "bm25_rank": bm25_ranks.get(page_id),
+            "rrf_score": scores[page_id],
+        }
+        for page_id in page_ids
+    ]
+
+
+def search_graph(query: str, *, use_rrf: bool = False) -> dict:
+    """検索で入口を選び、前後ページと共通用語で候補を広げる。"""
     pages = {page["page_id"]: page for page in load_pages(RAG_SOURCE)}
     graph = json.loads(RAG_GRAPH.read_text(encoding="utf-8"))
     nodes = {node["id"]: node for node in graph["nodes"]
@@ -151,12 +225,20 @@ def search_graph(query: str) -> dict:
             adjacent[a].add(b)
             adjacent[b].add(a)
 
-    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
+    vector_hits = [hit for hit in search(query) if hit["page_id"] in pages]
+    seed_limit = min(GRAPH_START_K, GRAPH_MAX_RESULTS)
+    if use_rrf:
+        seeds = _rrf_graph_seeds(vector_hits, _bm25_page_ids(query, pages), seed_limit)
+    else:
+        seeds = [
+            {"page_id": hit["page_id"], "distance": hit["distance"]}
+            for hit in vector_hits[:seed_limit]
+        ]
     seed_ids = {seed["page_id"] for seed in seeds}
     results, candidates = [], {}
     for rank, seed in enumerate(seeds):
         root = seed["page_id"]
-        results.append({**pages[root], "distance": seed["distance"], "hops": 0,
+        results.append({**pages[root], **seed, "hops": 0,
                         "path": [{"id": root, "title": pages[root]["title"]}]})
         queue = deque([(root, [root])])
         visited = {root}

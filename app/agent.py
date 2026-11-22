@@ -4,6 +4,7 @@
     uv run python -m app.agent "LoRAとQLoRAの違いは？"
     uv run python -m app.agent --trace "LoRAとQLoRAの違いは？"   # ツール呼び出しを表示
     uv run python -m app.agent --graph --trace "LoRAとQLoRAの違いは？"  # 検索からグラフをたどって回答
+    uv run python -m app.agent --graph-rrf --trace "LoRAとQLoRAの違いは？"  # BM25とベクトル検索を統合
     uv run python -m app.agent --tree --trace "LoRAとQLoRAの違いは？"  # 目次をたどって回答
     uv run python -m app.agent --full-context --trace "LoRAとQLoRAの違いは？"  # 全資料を一度に渡す
     uv run python -m app.agent --mcp --trace "LoRAとは？"        # 第5回: ツールを MCP サーバーから受け取る
@@ -21,7 +22,7 @@ from pathlib import Path
 from contextlib import nullcontext
 from time import perf_counter
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, Tool
 from pydantic_ai.exceptions import ModelHTTPError
 from fastmcp import Client
 from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -136,6 +137,24 @@ def print_tools(target: Agent) -> None:
         print(f"  引数: {json.dumps(params, ensure_ascii=False)}")
 
 
+def print_graph_trace(data: dict) -> None:
+    if "error" in data:
+        print(f"[tool return] search_graph -> {data['error']}")
+        return
+    seeds, expanded = data["seeds"], data["expanded"]
+    print(f"[tool return] search_graph -> 入口 {len(seeds)} 件、追加 {len(expanded)} 件")
+    for seed in seeds:
+        details = ""
+        if "rrf_score" in seed:
+            vector_rank = seed["vector_rank"] or "-"
+            bm25_rank = seed["bm25_rank"] or "-"
+            details = f"（ベクトル順位 {vector_rank}、BM25順位 {bm25_rank}、RRF {seed['rrf_score']:.6f}）"
+        print(f"  [入口] {seed['page_id']} · {seed['title']}{details}")
+    for page in expanded:
+        route = " → ".join(step["id"] for step in page["path"])
+        print(f"  [追加 {page['hops']} hop] {route} · {page['title']}")
+
+
 def print_trace(result, elapsed_seconds: float | None = None) -> None:
     """どのツールが、どの引数で呼ばれ、何を返したかを表示する。"""
     print("\n--- trace ---")
@@ -163,6 +182,8 @@ def print_trace(result, elapsed_seconds: float | None = None) -> None:
                                 print(f"      {child['content']}")
                         if not data["children"]:
                             print(f"    （末端ページ・本文{len(node.get('content', ''))}文字を取得）")
+                elif part.tool_name == "search_graph":
+                    print_graph_trace(json.loads(part.content))
                 else:
                     print(f"[tool return] {part.tool_name} -> {str(part.content)[:120]}…")
     usage = result.usage
@@ -180,6 +201,7 @@ def main() -> None:
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--mcp", action="store_true", help="第5回: ツールを MCP サーバー（app/mcp_servers.json）から受け取る")
     modes.add_argument("--graph", action="store_true", help="検索結果からグラフをたどり、候補ページを読んで答える")
+    modes.add_argument("--graph-rrf", action="store_true", help="BM25とベクトル検索の順位をRRF60で統合してからグラフをたどる")
     modes.add_argument("--tree", action="store_true", help="目次をたどり、必要なページを読んで答える")
     modes.add_argument("--full-context", action="store_true", help="検索せず、lectures.jsonの全資料を一度に渡す")
     parser.add_argument("--list-tools", action="store_true", help="モデルに見えるツール一覧を表示して終了する（APIキー不要）")
@@ -189,6 +211,14 @@ def main() -> None:
     mode = nullcontext()
     if args.tree:
         mode = target.override(instructions=TREE_INSTRUCTIONS, tools=[tools.browse_tree])
+    elif args.graph_rrf:
+        # 現行Graphと同じツール名・説明で、入口ページの選び方だけを切り替える。
+        graph_tool = Tool(
+            tools.search_graph_rrf,
+            name="search_graph",
+            description=inspect.cleandoc(tools.search_graph.__doc__),
+        )
+        mode = target.override(instructions=GRAPH_INSTRUCTIONS, tools=[graph_tool])
     elif args.graph:
         mode = target.override(instructions=GRAPH_INSTRUCTIONS, tools=[tools.search_graph])
     with mode:

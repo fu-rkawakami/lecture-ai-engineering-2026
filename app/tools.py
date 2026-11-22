@@ -116,12 +116,21 @@ def search_graph(query: str) -> str:
 
     queryに調べたい内容を指定する。
     """
+    return _graph_result(query, use_rrf=False)
+
+
+def search_graph_rrf(query: str) -> str:
+    """ベクトル検索とBM25の順位をRRF60で統合して、Graphの入口を選ぶ。"""
+    return _graph_result(query, use_rrf=True)
+
+
+def _graph_result(query: str, *, use_rrf: bool) -> str:
     import sqlite3
     from google.genai.errors import APIError
     from app.retrieval import search_graph as search
 
     try:
-        return json.dumps(search(query), ensure_ascii=False)
+        return json.dumps(search(query, use_rrf=use_rrf), ensure_ascii=False)
     except (ValueError, OSError, sqlite3.Error) as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
     except APIError as e:
